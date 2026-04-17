@@ -30,6 +30,7 @@ export const recipeSchema = z.object({
   ingredients: z.array(z.string()),
   instructions: z.array(z.string()),
   healthNotes: z.string(), // why this meal is good for the condition
+  imageUrl: z.string().optional(), // filled in client-side after plan arrives
 });
 
 export type Recipe = z.infer<typeof recipeSchema>;

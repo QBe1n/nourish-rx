@@ -1,0 +1,9 @@
+fastapi>=0.110
+uvicorn[standard]>=0.27
+anthropic>=0.40
+pillow>=10.0
+python-multipart>=0.0.9
+# LLM API proxy SDK — required for image generation via Perplexity's internal LLM API.
+# If running outside the Perplexity sandbox, swap generate_image.py with your own
+# implementation (e.g. calling OpenAI's Images API or Anthropic's upcoming image gen).
+pplx-python-sdks-llm-api

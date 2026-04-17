@@ -60,12 +60,20 @@ const MEAL_META: Record<
   snack: { label: "Snack", Icon: Cookie, tint: "text-[#8B6B3D]" },
 };
 
+type ImageState = { url?: string; loading: boolean; error: boolean };
+
 export default function Home() {
   const { toast } = useToast();
   const [condition, setCondition] = useState("");
   const [dietPreference, setDietPreference] = useState("none");
   const [allergies, setAllergies] = useState("");
   const resultsRef = useRef<HTMLDivElement>(null);
+  const [images, setImages] = useState<Record<Meal, ImageState>>({
+    breakfast: { loading: false, error: false },
+    lunch: { loading: false, error: false },
+    dinner: { loading: false, error: false },
+    snack: { loading: false, error: false },
+  });
 
   const mutation = useMutation<MealPlan, Error, void>({
     mutationFn: async () => {
@@ -85,10 +93,51 @@ export default function Home() {
     },
   });
 
+  // Reset image state whenever a new plan arrives, then fire parallel image requests
   useEffect(() => {
-    if (mutation.data && resultsRef.current) {
+    if (!mutation.data) return;
+    if (resultsRef.current) {
       resultsRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
     }
+
+    const plan = mutation.data;
+    const meals: Array<[Meal, Recipe | undefined]> = [
+      ["breakfast", plan.breakfast],
+      ["lunch", plan.lunch],
+      ["dinner", plan.dinner],
+      ["snack", plan.snack],
+    ];
+
+    // Initialize loading state for meals that exist
+    setImages({
+      breakfast: { loading: !!plan.breakfast, error: false },
+      lunch: { loading: !!plan.lunch, error: false },
+      dinner: { loading: !!plan.dinner, error: false },
+      snack: { loading: !!plan.snack, error: false },
+    });
+
+    // Fire all image requests in parallel
+    meals.forEach(([meal, recipe]) => {
+      if (!recipe) return;
+      apiRequest("POST", "/api/image", {
+        recipeName: recipe.name,
+        description: recipe.description,
+        meal,
+      })
+        .then((res) => res.json())
+        .then((data: { image: string }) => {
+          setImages((prev) => ({
+            ...prev,
+            [meal]: { url: data.image, loading: false, error: false },
+          }));
+        })
+        .catch(() => {
+          setImages((prev) => ({
+            ...prev,
+            [meal]: { loading: false, error: true },
+          }));
+        });
+    });
   }, [mutation.data]);
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -263,7 +312,11 @@ export default function Home() {
           className="relative z-10 mx-auto max-w-6xl px-5 pb-24 sm:px-8"
           data-testid="section-results"
         >
-          <PlanView plan={plan} onReset={() => mutation.reset()} />
+          <PlanView
+            plan={plan}
+            images={images}
+            onReset={() => mutation.reset()}
+          />
         </section>
       )}
 
@@ -295,7 +348,15 @@ function LoadingPreview() {
 
 /* ───────────────────────── Plan view ───────────────────────── */
 
-function PlanView({ plan, onReset }: { plan: MealPlan; onReset: () => void }) {
+function PlanView({
+  plan,
+  images,
+  onReset,
+}: {
+  plan: MealPlan;
+  images: Record<Meal, ImageState>;
+  onReset: () => void;
+}) {
   return (
     <div className="space-y-10">
       {/* Overview */}
@@ -355,10 +416,10 @@ function PlanView({ plan, onReset }: { plan: MealPlan; onReset: () => void }) {
 
       {/* Meals */}
       <div className="mx-auto max-w-5xl space-y-8">
-        <MealBlock meal="breakfast" recipe={plan.breakfast} />
-        <MealBlock meal="lunch" recipe={plan.lunch} />
-        <MealBlock meal="dinner" recipe={plan.dinner} />
-        {plan.snack && <MealBlock meal="snack" recipe={plan.snack} />}
+        <MealBlock meal="breakfast" recipe={plan.breakfast} image={images.breakfast} />
+        <MealBlock meal="lunch" recipe={plan.lunch} image={images.lunch} />
+        <MealBlock meal="dinner" recipe={plan.dinner} image={images.dinner} />
+        {plan.snack && <MealBlock meal="snack" recipe={plan.snack} image={images.snack} />}
       </div>
 
       {/* Hydration + disclaimer */}
@@ -420,7 +481,15 @@ function PanelList({
 
 /* ───────────────────────── Meal block ───────────────────────── */
 
-function MealBlock({ meal, recipe }: { meal: Meal; recipe: Recipe }) {
+function MealBlock({
+  meal,
+  recipe,
+  image,
+}: {
+  meal: Meal;
+  recipe: Recipe;
+  image: ImageState;
+}) {
   const { label, Icon, tint } = MEAL_META[meal];
 
   return (
@@ -428,6 +497,9 @@ function MealBlock({ meal, recipe }: { meal: Meal; recipe: Recipe }) {
       className="overflow-hidden border-card-border bg-card"
       data-testid={`card-meal-${meal}`}
     >
+      {/* Hero image */}
+      <RecipeImage alt={recipe.name} state={image} meal={meal} />
+
       <div className="flex flex-col gap-0 border-b border-border/60 p-6 sm:p-7">
         <div className="flex items-center gap-2">
           <Icon className={`h-4 w-4 ${tint}`} />
@@ -539,6 +611,59 @@ function MacroChip({ label, value }: { label: string; value: string }) {
       </div>
       <div className="mt-1 font-serif text-base font-medium leading-[1.35]">
         {value}
+      </div>
+    </div>
+  );
+}
+
+/* ───────────────────────── Recipe image ───────────────────────── */
+
+function RecipeImage({
+  alt,
+  state,
+  meal,
+}: {
+  alt: string;
+  state: ImageState;
+  meal: Meal;
+}) {
+  if (state.url) {
+    return (
+      <div className="relative aspect-[4/3] w-full overflow-hidden bg-muted sm:aspect-[16/9]">
+        <img
+          src={state.url}
+          alt={alt}
+          loading="lazy"
+          className="h-full w-full object-cover"
+          data-testid={`img-meal-${meal}`}
+        />
+      </div>
+    );
+  }
+
+  if (state.error) {
+    return (
+      <div
+        className="flex aspect-[4/3] w-full items-center justify-center bg-muted/50 text-xs text-muted-foreground sm:aspect-[16/9]"
+        data-testid={`img-meal-${meal}-error`}
+      >
+        Image unavailable
+      </div>
+    );
+  }
+
+  // Loading skeleton with subtle shimmer
+  return (
+    <div
+      className="relative aspect-[4/3] w-full overflow-hidden bg-muted sm:aspect-[16/9]"
+      data-testid={`img-meal-${meal}-loading`}
+    >
+      <div className="absolute inset-0 animate-pulse bg-gradient-to-br from-muted via-accent/40 to-muted" />
+      <div className="absolute inset-0 flex items-center justify-center">
+        <div className="flex items-center gap-2 rounded-full bg-background/70 px-3 py-1.5 text-xs text-muted-foreground backdrop-blur-sm">
+          <Loader2 className="h-3 w-3 animate-spin" />
+          Plating your {meal}…
+        </div>
       </div>
     </div>
   );
