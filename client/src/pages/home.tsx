@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
-import type { MealPlan, Recipe } from "@shared/schema";
+import type { MealPlan, Recipe, RecipeCost } from "@shared/schema";
 import { Logo } from "@/components/logo";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
@@ -32,6 +32,10 @@ import {
   Loader2,
   ArrowRight,
   RefreshCw,
+  Wallet,
+  PiggyBank,
+  ShoppingBag,
+  DollarSign,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
@@ -61,6 +65,14 @@ const MEAL_META: Record<
 };
 
 type ImageState = { url?: string; loading: boolean; error: boolean };
+type CostState = { cost?: RecipeCost; loading: boolean; error: boolean };
+
+const fmtUSD = (n: number) =>
+  n.toLocaleString("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: n >= 100 ? 0 : 2,
+  });
 
 export default function Home() {
   const { toast } = useToast();
@@ -74,6 +86,13 @@ export default function Home() {
     dinner: { loading: false, error: false },
     snack: { loading: false, error: false },
   });
+  const [costs, setCosts] = useState<Record<Meal, CostState>>({
+    breakfast: { loading: false, error: false },
+    lunch: { loading: false, error: false },
+    dinner: { loading: false, error: false },
+    snack: { loading: false, error: false },
+  });
+  const [monthlyIncome, setMonthlyIncome] = useState<string>("");
 
   const mutation = useMutation<MealPlan, Error, void>({
     mutationFn: async () => {
@@ -115,6 +134,12 @@ export default function Home() {
       dinner: { loading: !!plan.dinner, error: false },
       snack: { loading: !!plan.snack, error: false },
     });
+    setCosts({
+      breakfast: { loading: !!plan.breakfast, error: false },
+      lunch: { loading: !!plan.lunch, error: false },
+      dinner: { loading: !!plan.dinner, error: false },
+      snack: { loading: !!plan.snack, error: false },
+    });
 
     // Fire all image requests in parallel
     meals.forEach(([meal, recipe]) => {
@@ -133,6 +158,30 @@ export default function Home() {
         })
         .catch(() => {
           setImages((prev) => ({
+            ...prev,
+            [meal]: { loading: false, error: true },
+          }));
+        });
+    });
+
+    // Fire all cost requests in parallel
+    meals.forEach(([meal, recipe]) => {
+      if (!recipe) return;
+      apiRequest("POST", "/api/cost", {
+        recipeName: recipe.name,
+        ingredients: recipe.ingredients,
+        servings: recipe.servings,
+        meal,
+      })
+        .then((res) => res.json())
+        .then((data: RecipeCost) => {
+          setCosts((prev) => ({
+            ...prev,
+            [meal]: { cost: data, loading: false, error: false },
+          }));
+        })
+        .catch(() => {
+          setCosts((prev) => ({
             ...prev,
             [meal]: { loading: false, error: true },
           }));
@@ -315,6 +364,9 @@ export default function Home() {
           <PlanView
             plan={plan}
             images={images}
+            costs={costs}
+            monthlyIncome={monthlyIncome}
+            onIncomeChange={setMonthlyIncome}
             onReset={() => mutation.reset()}
           />
         </section>
@@ -351,10 +403,16 @@ function LoadingPreview() {
 function PlanView({
   plan,
   images,
+  costs,
+  monthlyIncome,
+  onIncomeChange,
   onReset,
 }: {
   plan: MealPlan;
   images: Record<Meal, ImageState>;
+  costs: Record<Meal, CostState>;
+  monthlyIncome: string;
+  onIncomeChange: (v: string) => void;
   onReset: () => void;
 }) {
   return (
@@ -414,12 +472,22 @@ function PlanView({
         />
       </div>
 
+      {/* Financial layer */}
+      <div className="mx-auto max-w-5xl">
+        <BudgetPanel
+          plan={plan}
+          costs={costs}
+          monthlyIncome={monthlyIncome}
+          onIncomeChange={onIncomeChange}
+        />
+      </div>
+
       {/* Meals */}
       <div className="mx-auto max-w-5xl space-y-8">
-        <MealBlock meal="breakfast" recipe={plan.breakfast} image={images.breakfast} />
-        <MealBlock meal="lunch" recipe={plan.lunch} image={images.lunch} />
-        <MealBlock meal="dinner" recipe={plan.dinner} image={images.dinner} />
-        {plan.snack && <MealBlock meal="snack" recipe={plan.snack} image={images.snack} />}
+        <MealBlock meal="breakfast" recipe={plan.breakfast} image={images.breakfast} cost={costs.breakfast} />
+        <MealBlock meal="lunch" recipe={plan.lunch} image={images.lunch} cost={costs.lunch} />
+        <MealBlock meal="dinner" recipe={plan.dinner} image={images.dinner} cost={costs.dinner} />
+        {plan.snack && <MealBlock meal="snack" recipe={plan.snack} image={images.snack} cost={costs.snack} />}
       </div>
 
       {/* Hydration + disclaimer */}
@@ -485,10 +553,12 @@ function MealBlock({
   meal,
   recipe,
   image,
+  cost,
 }: {
   meal: Meal;
   recipe: Recipe;
   image: ImageState;
+  cost: CostState;
 }) {
   const { label, Icon, tint } = MEAL_META[meal];
 
@@ -523,6 +593,7 @@ function MealBlock({
           <Stat icon={<Flame className="h-3.5 w-3.5" />} label="Cook" value={recipe.cookTime} />
           <Stat icon={<Users className="h-3.5 w-3.5" />} label="Serves" value={String(recipe.servings)} />
           <Stat icon={<Sparkles className="h-3.5 w-3.5" />} label="Calories" value={`${recipe.calories} kcal`} />
+          <CostStat state={cost} meal={meal} />
         </div>
 
         {/* Macros */}
@@ -665,6 +736,329 @@ function RecipeImage({
           Plating your {meal}…
         </div>
       </div>
+    </div>
+  );
+}
+
+/* ───────────────────────── Per-meal cost chip ───────────────────────── */
+
+function CostStat({ state, meal }: { state: CostState; meal: Meal }) {
+  if (state.loading) {
+    return (
+      <span className="flex items-center gap-1.5" data-testid={`cost-meal-${meal}-loading`}>
+        <DollarSign className="h-3.5 w-3.5" />
+        <span className="text-muted-foreground">Cost</span>
+        <span className="inline-block h-3 w-10 animate-pulse rounded bg-muted" />
+      </span>
+    );
+  }
+  if (state.error || !state.cost) {
+    return (
+      <span className="flex items-center gap-1.5" data-testid={`cost-meal-${meal}-error`}>
+        <DollarSign className="h-3.5 w-3.5" />
+        <span className="text-muted-foreground">Cost</span>
+        <span className="text-muted-foreground/70">—</span>
+      </span>
+    );
+  }
+  return (
+    <span className="flex items-center gap-1.5" data-testid={`cost-meal-${meal}`}>
+      <DollarSign className="h-3.5 w-3.5" />
+      <span className="text-muted-foreground">Cost</span>
+      <span className="font-medium text-foreground">
+        {fmtUSD(state.cost.perServingCost)}
+        <span className="text-[11px] text-muted-foreground">/serving</span>
+      </span>
+    </span>
+  );
+}
+
+/* ───────────────────────── Budget panel (50/30/20) ───────────────────────── */
+
+function BudgetPanel({
+  plan,
+  costs,
+  monthlyIncome,
+  onIncomeChange,
+}: {
+  plan: MealPlan;
+  costs: Record<Meal, CostState>;
+  monthlyIncome: string;
+  onIncomeChange: (v: string) => void;
+}) {
+  // Sum per-serving costs across meals that have loaded
+  const mealsInPlan: Meal[] = [
+    "breakfast",
+    "lunch",
+    "dinner",
+    ...(plan.snack ? ["snack" as Meal] : []),
+  ];
+  const loaded = mealsInPlan.filter((m) => costs[m].cost);
+  const anyLoading = mealsInPlan.some((m) => costs[m].loading);
+  const allLoaded = loaded.length === mealsInPlan.length;
+
+  const dailyCost = loaded.reduce(
+    (sum, m) => sum + (costs[m].cost?.perServingCost ?? 0),
+    0
+  );
+  const weeklyCost = dailyCost * 7;
+  const monthlyCost = dailyCost * 30;
+
+  const income = Math.max(0, parseFloat(monthlyIncome) || 0);
+  const needs = income * 0.5;
+  const wants = income * 0.3;
+  const save = income * 0.2;
+
+  // % of the 'needs' bucket consumed by food (using monthly food cost)
+  const foodPctOfNeeds =
+    income > 0 && allLoaded ? (monthlyCost / needs) * 100 : null;
+
+  // Health flag color
+  const pctTone =
+    foodPctOfNeeds == null
+      ? "text-muted-foreground"
+      : foodPctOfNeeds <= 35
+      ? "text-secondary"
+      : foodPctOfNeeds <= 60
+      ? "text-[#C98A2B]"
+      : "text-destructive";
+
+  return (
+    <Card className="overflow-hidden border-card-border bg-card" data-testid="panel-budget">
+      {/* Header */}
+      <div className="border-b border-border/60 p-6 sm:p-7">
+        <div className="flex items-center gap-2">
+          <Wallet className="h-4 w-4 text-primary" />
+          <span className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
+            Financial layer
+          </span>
+        </div>
+        <h3 className="mt-2 font-serif text-[clamp(1.35rem,1rem+1.2vw,1.875rem)] font-medium leading-tight">
+          Budget & meal cost
+        </h3>
+        <p className="mt-2 max-w-2xl text-sm text-muted-foreground sm:text-base">
+          Estimates based on U.S. mid-market grocery prices. Enter your monthly
+          income and we'll show how this plan fits a 50/30/20 budget.
+        </p>
+      </div>
+
+      {/* Cost summary */}
+      <div className="grid gap-0 border-b border-border/60 sm:grid-cols-3">
+        <CostTile
+          label="Per day"
+          value={loaded.length ? fmtUSD(dailyCost) : "—"}
+          note={
+            anyLoading
+              ? `Calculating ${mealsInPlan.length - loaded.length} more…`
+              : `${loaded.length} of ${mealsInPlan.length} meals`
+          }
+          testid="stat-cost-daily"
+        />
+        <CostTile
+          label="Per week"
+          value={loaded.length ? fmtUSD(weeklyCost) : "—"}
+          note="7 days at this plan"
+          testid="stat-cost-weekly"
+        />
+        <CostTile
+          label="Per month"
+          value={loaded.length ? fmtUSD(monthlyCost) : "—"}
+          note="30 days at this plan"
+          testid="stat-cost-monthly"
+          highlight
+        />
+      </div>
+
+      {/* Income input */}
+      <div className="border-b border-border/60 p-6 sm:p-7">
+        <Label htmlFor="income" className="text-sm font-medium">
+          Your monthly after-tax income (USD)
+        </Label>
+        <div className="relative mt-2 max-w-xs">
+          <DollarSign className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            id="income"
+            type="number"
+            inputMode="decimal"
+            min={0}
+            step={100}
+            value={monthlyIncome}
+            onChange={(e) => onIncomeChange(e.target.value)}
+            placeholder="e.g. 5000"
+            className="bg-background pl-9"
+            data-testid="input-income"
+          />
+        </div>
+        <p className="mt-2 text-xs text-muted-foreground">
+          Used only in your browser — not stored or sent anywhere except to compute your split.
+        </p>
+      </div>
+
+      {/* 50/30/20 breakdown */}
+      {income > 0 && (
+        <div className="p-6 sm:p-7" data-testid="panel-budget-breakdown">
+          <div className="mb-4 flex flex-wrap items-end justify-between gap-2">
+            <h4 className="font-serif text-lg font-medium">
+              Your 50 / 30 / 20 split
+            </h4>
+            {foodPctOfNeeds != null && (
+              <span
+                className={`text-sm font-medium ${pctTone}`}
+                data-testid="text-food-pct"
+              >
+                Food = {foodPctOfNeeds.toFixed(1)}% of your Needs
+              </span>
+            )}
+          </div>
+
+          {/* Stacked bar */}
+          <div className="mb-5 flex h-3 w-full overflow-hidden rounded-full border border-border bg-background">
+            <div className="bg-primary" style={{ width: "50%" }} title="Needs 50%" />
+            <div className="bg-secondary" style={{ width: "30%" }} title="Wants 30%" />
+            <div className="bg-[#C98A2B]" style={{ width: "20%" }} title="Save 20%" />
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-3">
+            <BudgetBucket
+              tone="primary"
+              icon={<ShoppingBag className="h-4 w-4" />}
+              label="Needs"
+              pct={50}
+              amount={needs}
+              foodAmount={allLoaded ? monthlyCost : undefined}
+              foodPct={foodPctOfNeeds ?? undefined}
+              sublabel="Rent, utilities, groceries, transport"
+            />
+            <BudgetBucket
+              tone="secondary"
+              icon={<Sparkles className="h-4 w-4" />}
+              label="Wants"
+              pct={30}
+              amount={wants}
+              sublabel="Dining out, entertainment, subscriptions"
+            />
+            <BudgetBucket
+              tone="amber"
+              icon={<PiggyBank className="h-4 w-4" />}
+              label="Save / Invest"
+              pct={20}
+              amount={save}
+              sublabel="Emergency fund, retirement, investing"
+            />
+          </div>
+
+          {/* Verdict */}
+          {foodPctOfNeeds != null && (
+            <div
+              className="mt-5 rounded-md border border-border bg-accent/40 px-4 py-3 text-sm"
+              data-testid="text-budget-verdict"
+            >
+              {foodPctOfNeeds <= 35 ? (
+                <>
+                  <span className="font-medium text-secondary">Comfortable fit. </span>
+                  At {fmtUSD(monthlyCost)}/mo, this plan uses only {foodPctOfNeeds.toFixed(1)}% of your
+                  Needs bucket ({fmtUSD(needs)}), leaving room for rent, utilities, and other essentials.
+                </>
+              ) : foodPctOfNeeds <= 60 ? (
+                <>
+                  <span className="font-medium text-[#C98A2B]">Manageable. </span>
+                  Food would take {foodPctOfNeeds.toFixed(1)}% of your Needs ({fmtUSD(monthlyCost)} of {fmtUSD(needs)}).
+                  Watch rent + utilities so the Needs bucket doesn't overflow.
+                </>
+              ) : (
+                <>
+                  <span className="font-medium text-destructive">Tight budget. </span>
+                  Food alone is {foodPctOfNeeds.toFixed(1)}% of Needs ({fmtUSD(monthlyCost)} of {fmtUSD(needs)}).
+                  Consider cheaper protein swaps, bulk grains, or scaling servings.
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function CostTile({
+  label,
+  value,
+  note,
+  testid,
+  highlight,
+}: {
+  label: string;
+  value: string;
+  note: string;
+  testid: string;
+  highlight?: boolean;
+}) {
+  return (
+    <div
+      className={`border-b border-border/60 p-5 last:border-b-0 sm:border-b-0 sm:border-r sm:last:border-r-0 ${
+        highlight ? "bg-accent/40" : ""
+      }`}
+      data-testid={testid}
+    >
+      <div className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+        {label}
+      </div>
+      <div className="mt-1 font-serif text-[clamp(1.5rem,1.2rem+1vw,2rem)] font-medium leading-[1.2]">
+        {value}
+      </div>
+      <div className="mt-1 text-xs text-muted-foreground">{note}</div>
+    </div>
+  );
+}
+
+function BudgetBucket({
+  tone,
+  icon,
+  label,
+  pct,
+  amount,
+  sublabel,
+  foodAmount,
+  foodPct,
+}: {
+  tone: "primary" | "secondary" | "amber";
+  icon: React.ReactNode;
+  label: string;
+  pct: number;
+  amount: number;
+  sublabel: string;
+  foodAmount?: number;
+  foodPct?: number;
+}) {
+  const tones = {
+    primary: { pill: "bg-primary/10 text-primary", bar: "bg-primary" },
+    secondary: { pill: "bg-secondary/10 text-secondary", bar: "bg-secondary" },
+    amber: { pill: "bg-[#C98A2B]/15 text-[#C98A2B]", bar: "bg-[#C98A2B]" },
+  }[tone];
+
+  return (
+    <div className="rounded-md border border-border bg-background/60 p-4">
+      <div className="flex items-center gap-2">
+        <div className={`rounded-full p-1.5 ${tones.pill}`}>{icon}</div>
+        <span className="text-sm font-medium">{label}</span>
+        <span className="ml-auto text-xs text-muted-foreground">{pct}%</span>
+      </div>
+      <div className="mt-3 font-serif text-xl font-medium">{fmtUSD(amount)}</div>
+      <p className="mt-1 text-xs text-muted-foreground">{sublabel}</p>
+      {foodAmount != null && foodPct != null && (
+        <div className="mt-3 border-t border-border/60 pt-3">
+          <div className="mb-1.5 flex justify-between text-[11px] text-muted-foreground">
+            <span>Food this plan</span>
+            <span className="font-medium text-foreground">{fmtUSD(foodAmount)}</span>
+          </div>
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+            <div
+              className={`h-full ${tones.bar}`}
+              style={{ width: `${Math.min(100, foodPct).toFixed(1)}%` }}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

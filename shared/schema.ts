@@ -33,6 +33,25 @@ export const recipeSchema = z.object({
   imageUrl: z.string().optional(), // filled in client-side after plan arrives
 });
 
+// Cost estimation for a single recipe
+export const recipeCostSchema = z.object({
+  currency: z.string().default("USD"),
+  totalCost: z.number(), // USD for the whole recipe (all servings)
+  perServingCost: z.number(),
+  breakdown: z
+    .array(
+      z.object({
+        item: z.string(),
+        cost: z.number(),
+        note: z.string().optional(),
+      })
+    )
+    .default([]),
+  confidence: z.enum(["low", "medium", "high"]).default("medium"),
+});
+
+export type RecipeCost = z.infer<typeof recipeCostSchema>;
+
 export type Recipe = z.infer<typeof recipeSchema>;
 
 // Full meal plan response

@@ -94,6 +94,13 @@ class ImageRequest(BaseModel):
     meal: Literal["breakfast", "lunch", "dinner", "snack"] = "lunch"
 
 
+class CostRequest(BaseModel):
+    recipeName: str = Field(..., min_length=2, max_length=200)
+    ingredients: list[str] = Field(..., min_length=1, max_length=40)
+    servings: int = Field(default=1, ge=1, le=12)
+    meal: Literal["breakfast", "lunch", "dinner", "snack"] = "lunch"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -256,6 +263,85 @@ async def generate_recipe_image(req: ImageRequest) -> JSONResponse:
 
     b64 = base64.b64encode(compressed).decode()
     return JSONResponse({"image": f"data:image/jpeg;base64,{b64}"})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cost estimation
+# ─────────────────────────────────────────────────────────────────────────────
+
+COST_SYSTEM_PROMPT = """You are a grocery pricing analyst. Given a recipe name and its ingredient list,
+you estimate the cost to cook the recipe at home using realistic U.S. supermarket prices
+(e.g. Kroger, Safeway, Publix mid-market averages — not Whole Foods, not discount).
+
+CRITICAL RULES:
+1. Prices are in USD.
+2. Only count the fraction of each ingredient actually used (e.g. 1 tbsp olive oil ≈ $0.10, not a full bottle).
+3. Salt, pepper, water, and common pantry staples in trivial amounts should be rolled into a small "pantry" line (≤$0.50) — don't skip them but don't overcount.
+4. Return the TOTAL recipe cost and the PER-SERVING cost. Per-serving = total / servings.
+5. Be realistic: a typical home breakfast is $1-4/serving, lunch $2-6/serving, dinner $3-9/serving, snack $0.50-3/serving.
+6. Return ONLY valid JSON matching the schema. No markdown, no commentary."""
+
+COST_SCHEMA_HINT = """{
+  "currency": "USD",
+  "totalCost": number (USD, 2 decimals),
+  "perServingCost": number (USD, 2 decimals),
+  "breakdown": [
+    { "item": "string — the ingredient", "cost": number (USD), "note": "optional short note like '1 tbsp used'" }
+  ],
+  "confidence": "low" | "medium" | "high"
+}"""
+
+
+@app.post("/api/cost")
+async def estimate_cost(req: CostRequest) -> JSONResponse:
+    user_prompt = (
+        f"Recipe: {req.recipeName}\n"
+        f"Meal: {req.meal}\n"
+        f"Servings: {req.servings}\n"
+        f"Ingredients:\n- " + "\n- ".join(req.ingredients) + "\n\n"
+        "Estimate the total cost and per-serving cost at a U.S. mid-market supermarket. "
+        "Return ONLY the JSON object matching this schema — no prose, no markdown:\n\n"
+        f"{COST_SCHEMA_HINT}"
+    )
+
+    try:
+        message = anthropic_client.messages.create(
+            model="claude_sonnet_4_6",
+            max_tokens=1500,
+            system=COST_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+    except Exception as exc:
+        print(f"[cost] LLM call failed: {exc}")
+        raise HTTPException(status_code=500, detail=f"Failed to estimate cost: {exc}")
+
+    text_block: Optional[str] = None
+    for block in message.content:
+        if getattr(block, "type", None) == "text":
+            text_block = block.text
+            break
+    if not text_block:
+        raise HTTPException(status_code=502, detail="Empty response from model")
+
+    try:
+        data = json.loads(extract_json(text_block))
+    except json.JSONDecodeError as exc:
+        print(f"[cost] JSON parse failed: {exc}")
+        print(f"[cost] Raw: {text_block[:800]}")
+        raise HTTPException(status_code=502, detail="Model returned invalid cost format")
+
+    # Sanity defaults
+    data.setdefault("currency", "USD")
+    data.setdefault("confidence", "medium")
+    data.setdefault("breakdown", [])
+    if "totalCost" not in data or "perServingCost" not in data:
+        raise HTTPException(status_code=502, detail="Model response missing cost fields")
+
+    print(
+        f"[cost] {req.meal} {req.recipeName}: total=${data['totalCost']:.2f} "
+        f"per-serving=${data['perServingCost']:.2f}"
+    )
+    return JSONResponse(data)
 
 
 @app.get("/api/health")

@@ -22,6 +22,7 @@ Built for type 2 diabetes, hypertension, IBS, PCOS, high cholesterol, fatty live
 - **Hydration guidance** tuned to the condition
 - **Medical disclaimer** on every plan
 - **Parallel image loading** — the plan renders immediately; images stream in per-meal with a skeleton loader
+- **💰 Financial layer** — Claude estimates per-recipe grocery cost at U.S. mid-market supermarket prices (Kroger/Safeway/Publix), then rolls up into **daily / weekly / monthly** food spend. Enter your monthly income and the app splits it into a **50 / 30 / 20** budget (Needs / Wants / Save & Invest) and shows exactly what % of your Needs bucket food is consuming, with a color-coded verdict (Comfortable / Manageable / Tight).
 - **Light + dark mode**, fully responsive, warm editorial cookbook palette (terracotta + forest on cream)
 
 ---
@@ -47,7 +48,7 @@ The frontend is intentionally thin: the Python server's job is to proxy to the L
 ```
 nourish-rx/
 ├── backend/                    # ⭐ Python FastAPI server
-│   ├── app.py                  #   /api/plan, /api/image, static serving
+│   ├── app.py                  #   /api/plan, /api/image, /api/cost, static serving
 │   ├── generate_image.py       #   LLM API helper (copied from skills/)
 │   └── requirements.txt        #   Python deps
 ├── client/                     # Vite + React frontend
@@ -236,6 +237,34 @@ Generate a food-photography image for one recipe.
 
 The server prompts the image model with a meal-specific setting (morning light for breakfast, golden-hour for dinner, etc.), renders at 4:3, then resizes to max 1200px wide and re-encodes as JPEG q=82 — typically ~150–250 KB per image.
 
+### `POST /api/cost`
+
+Estimates the grocery cost of a single recipe using Claude as a pricing analyst. Prices are mid-market U.S. supermarket averages (think Kroger / Safeway / Publix), accounting for the *fraction* of each ingredient actually used (1 tbsp olive oil ≈ $0.10, not a whole bottle).
+
+```json
+// Request
+{
+  "recipeName": "Blueberry & Maple Low-FODMAP Oat Bowl",
+  "ingredients": ["1/2 cup rolled oats", "1 cup lactose-free milk", "..."],
+  "servings": 1,
+  "meal": "breakfast"
+}
+
+// Response
+{
+  "currency": "USD",
+  "totalCost": 3.27,
+  "perServingCost": 3.27,
+  "breakdown": [
+    { "item": "rolled oats", "cost": 0.18, "note": "1/2 cup from ~$3.50/42oz canister" },
+    { "item": "lactose-free milk", "cost": 0.55, "note": "1 cup from ~$4.50/half-gallon" }
+  ],
+  "confidence": "high"
+}
+```
+
+The frontend fires one `/api/cost` per meal in parallel, then sums the per-serving costs into a **daily / weekly / monthly** food budget. When the user enters their monthly after-tax income, the UI splits it into a **50 / 30 / 20** budget (Needs / Wants / Save-Invest) and shows what % of the Needs bucket food consumes, with a color-coded verdict.
+
 ### `GET /api/health`
 
 Simple liveness check: `{"status": "ok"}`.
@@ -253,6 +282,11 @@ curl -X POST http://localhost:5000/api/image \
   -H "Content-Type: application/json" \
   -d '{"recipeName":"Mediterranean Lentil Bowl","description":"Warm lentils with roasted vegetables","meal":"lunch"}' \
   -o /tmp/image.json
+
+# Cost for one recipe
+curl -X POST http://localhost:5000/api/cost \
+  -H "Content-Type: application/json" \
+  -d '{"recipeName":"Mediterranean Lentil Bowl","ingredients":["1 cup lentils","2 tbsp olive oil","1 zucchini"],"servings":2,"meal":"lunch"}'
 ```
 
 ---
